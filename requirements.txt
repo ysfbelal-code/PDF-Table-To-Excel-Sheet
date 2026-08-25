@@ -9,5 +9,4 @@ torch>=1.13.0
 easyocr>=1.7.0
 pytesseract>=0.3.10
 pdf2image>=1.16.0
-opencv-python-headless==4.9.0.80   # or latest, but pin it
-opencv-python==0.0.0   # dummy package to prevent installation
+opencv-python-headless>=4.5.0
