@@ -137,8 +137,9 @@ def _merge_multiline_generic(df):
 
     Fallback: if anchor detection fails, any row with exactly one non‑null value (in the
     description column) is merged into the previous row's description cell and then dropped.
+    Now works even for tables with only 2 rows.
     """
-    if df.empty or df.shape[0] < 3:
+    if df.empty:
         return df
 
     try:
