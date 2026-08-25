@@ -57,6 +57,25 @@ INPUT_UNKNOWN_PDF = "file.pdf"
 FINAL_EXCEL_OUTPUT = "fully_dynamic_extraction.xlsx"
 
 
+def _sanitize_for_excel(val):
+    """Remove invalid XML characters that break Excel files.
+    Valid XML 1.0 char ranges: #x9 | #xA | #xD | [#x20-#xD7FF] | [#xE000-#xFFFD] | [#x10000-#x10FFFF]
+    """
+    if val is None:
+        return None
+    s = str(val)
+    # Remove control characters except tab (0x09), newline (0x0A), carriage return (0x0D)
+    # Also remove null bytes and other problematic characters
+    cleaned = "".join(
+        ch for ch in s
+        if ord(ch) == 0x09 or ord(ch) == 0x0A or ord(ch) == 0x0D
+        or (0x20 <= ord(ch) <= 0xD7FF)
+        or (0xE000 <= ord(ch) <= 0xFFFD)
+        or (ord(ch) > 0xFFFF)  # Allow supplementary planes
+    )
+    return cleaned.strip() if cleaned.strip() else None
+
+
 def _get_ocr(multilingual=True):
     """Try DocTR (best for this scan: 95 words avg 81 vs Tesseract 69 avg 35), fallback to EasyOCR, then Tesseract.
     multilingual=True enables English+Arabic in same cell (user requirement)."""
@@ -104,7 +123,8 @@ def _clean_cell(val):
         return None
     s = re.sub(r"\s*\n\s*", " ", s)
     s = s.strip()
-    return s if s else None
+    # Apply Excel sanitization
+    return _sanitize_for_excel(s)
 
 
 def _merge_multiline_generic(df):
@@ -168,7 +188,7 @@ def _merge_multiline_generic(df):
         for a in sorted(anchor_indices):
             row = df.iloc[a].copy()
             # Collect descs for this anchor in original order
-            assigned = [a] + [i for i in range(len(df)) if i not in anchor_indices and min(anchor_indices, key=lambda x: abs(i - x)) == a and not date_re.match(str(df.iloc[i][desc_col]).strip() if pd.notna(df.iloc[i][desc_col]) else "")]
+            assigned = [a] + [i for i in range(len(df)) if i not in anchor_indices and min(anchor_indices, key=lambda x: abs(i - x)) == a and not date_re.match(str(df.iloc[i][desc_col]).strip())]
             # Filter out date-only
             descs_ordered = []
             for idx in sorted(set(assigned)):
@@ -599,19 +619,19 @@ def enterprise_grade_table_miner(input_path, output_excel, combine_mode="separat
                                             txt = txt.strip()
                                             new_header.append(txt if txt else str(cell.value) if cell.value else "")
                                     if any(new_header):
-                                        df.columns = [v.strip() if v and str(v).strip().lower() != "none" else f"Column_{i+1}" for i, v in enumerate(new_header)]
+                                        df.columns = [_sanitize_for_excel(v) or f"Column_{i+1}" for i, v in enumerate(new_header)]
                                         df = df[1:].reset_index(drop=True)
                                     else:
-                                        df.columns = [str(v).strip() if v and str(v).strip().lower() != "none" else f"Column_{i+1}" for i, v in enumerate(header_vals)]
+                                        df.columns = [_sanitize_for_excel(str(v)) or f"Column_{i+1}" for i, v in enumerate(header_vals)]
                                         df = df[1:].reset_index(drop=True)
                                 else:
-                                    df.columns = [str(v).strip() if v and str(v).strip().lower() != "none" else f"Column_{i+1}" for i, v in enumerate(header_vals)]
+                                    df.columns = [_sanitize_for_excel(str(v)) or f"Column_{i+1}" for i, v in enumerate(header_vals)]
                                     df = df[1:].reset_index(drop=True)
                             except Exception:
-                                df.columns = [str(v).strip() if v and str(v).strip().lower() != "none" else f"Column_{i+1}" for i, v in enumerate(header_vals)]
+                                df.columns = [_sanitize_for_excel(str(v)) or f"Column_{i+1}" for i, v in enumerate(header_vals)]
                                 df = df[1:].reset_index(drop=True)
                         else:
-                            df.columns = [str(v).strip() if v and str(v).strip().lower() != "none" else f"Column_{i+1}" for i, v in enumerate(header_vals)]
+                            df.columns = [_sanitize_for_excel(str(v)) or f"Column_{i+1}" for i, v in enumerate(header_vals)]
                             df = df[1:].reset_index(drop=True)
                     else:
                         df.columns = [f"Column_{i+1}" for i in range(df.shape[1])]
@@ -671,7 +691,7 @@ def enterprise_grade_table_miner(input_path, output_excel, combine_mode="separat
         for idx, (sheet_name, df) in enumerate(tables_to_write.items()):
             # Title row - merged across all columns
             title = f"{sheet_name} (Page {sheet_name.split('_')[1] if 'Page_' in sheet_name else ''})"
-            c = ws.cell(row=current_row, column=1, value=title)
+            c = ws.cell(row=current_row, column=1, value=_sanitize_for_excel(title))
             c.font = Font(bold=True, color="2B5DA8", size=10)
             c.alignment = Alignment(horizontal="left", vertical="center")
             c.border = thin_border
@@ -680,7 +700,7 @@ def enterprise_grade_table_miner(input_path, output_excel, combine_mode="separat
             current_row += 1
             # Header
             for col_idx, col_name in enumerate(df.columns, start=1):
-                cell = ws.cell(row=current_row, column=col_idx, value=str(col_name))
+                cell = ws.cell(row=current_row, column=col_idx, value=_sanitize_for_excel(str(col_name)))
                 cell.font = header_font
                 cell.fill = header_fill
                 cell.alignment = header_align
@@ -693,18 +713,20 @@ def enterprise_grade_table_miner(input_path, output_excel, combine_mode="separat
                 if len(non_none) == 1:
                     # Single value row - merge across all columns into first cell (revised merging for Page_1_Table_1)
                     _, val = non_none[0]
-                    cell = ws.cell(row=current_row, column=1, value=val)
-                    base_align = Alignment(horizontal="right" if val and any("\u0600" <= c <= "\u06FF" for c in str(val)) else "left", vertical="center", wrap_text=True)
+                    sanitized_val = _sanitize_for_excel(val)
+                    cell = ws.cell(row=current_row, column=1, value=sanitized_val)
+                    base_align = Alignment(horizontal="right" if sanitized_val and any("\u0600" <= c <= "\u06FF" for c in str(sanitized_val)) else "left", vertical="center", wrap_text=True)
                     cell.alignment = base_align
                     cell.border = thin_border
                     if len(df.columns) > 1:
                         ws.merge_cells(start_row=current_row, start_column=1, end_row=current_row, end_column=len(df.columns))
                 else:
                     for col_idx, val in enumerate(row, start=1):
-                        cell = ws.cell(row=current_row, column=col_idx, value=val)
+                        sanitized_val = _sanitize_for_excel(val)
+                        cell = ws.cell(row=current_row, column=col_idx, value=sanitized_val)
                         cell.alignment = cell_align
                         cell.border = thin_border
-                        if val and any("\u0600" <= c <= "\u06FF" for c in str(val)):
+                        if sanitized_val and any("\u0600" <= c <= "\u06FF" for c in str(sanitized_val)):
                             cell.alignment = Alignment(horizontal="right", vertical="center", wrap_text=True)
                 current_row += 1
             # One blank row separator
