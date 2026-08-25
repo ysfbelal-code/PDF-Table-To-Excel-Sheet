@@ -106,108 +106,56 @@ def _clean_cell(val):
     return _sanitize_for_excel(s)
 
 
-def _merge_multiline_generic(df):
+def _merge_continuation_rows(df):
     """
-    Merge vertically split multi-line values into the first cell of each logical row.
-    Dynamic: finds the sparsest column (anchor) and the densest column (description),
-    then merges all continuation rows (rows where only the description column has a value)
-    into the nearest anchor row's description cell.
-
-    Fallback: any row with exactly one non‑null value (in the description column)
-    is merged into the previous row's description cell and then dropped.
-    Works even for small tables (>=2 rows).
+    Merge continuation rows into the preceding anchor row.
+    A continuation row is identified by an empty value in the first column (key column).
+    All non‑null values from the continuation row are appended (with '\n') to the
+    corresponding columns of the nearest previous row that has a non‑empty key.
     """
-    if df.empty:
+    if df.empty or len(df) < 2:
         return df
 
-    try:
-        counts = {c: df[c].notna().sum() for c in df.columns}
-        total = len(df)
+    key_col = df.columns[0]
+    rows_to_drop = []
 
-        # Anchor: sparsest column with at least 2 non‑null values
-        candidates = [c for c, cnt in counts.items() if cnt > 1]
-        anchor_col = min(candidates, key=lambda c: counts[c]) if candidates else None
+    for i in range(1, len(df)):
+        row = df.iloc[i]
+        key_val = row[key_col]
+        # Check if key is empty (None or blank string)
+        is_empty_key = pd.isna(key_val) or (isinstance(key_val, str) and key_val.strip() == "")
+        if not is_empty_key:
+            continue
 
-        # Description: densest column
-        desc_col = max(counts, key=lambda k: counts[k]) if counts else None
+        # Find the nearest row above with a non‑empty key
+        anchor_idx = i - 1
+        while anchor_idx >= 0:
+            anchor_key = df.iloc[anchor_idx][key_col]
+            if not (pd.isna(anchor_key) or (isinstance(anchor_key, str) and anchor_key.strip() == "")):
+                break
+            anchor_idx -= 1
+        if anchor_idx < 0:
+            continue  # no anchor found, skip
 
-        merged_df = None
-        if anchor_col is not None and desc_col is not None and anchor_col != desc_col:
-            if counts[desc_col] >= total * 0.3:
-                anchor_indices = [
-                    i for i, r in df.iterrows()
-                    if pd.notna(r[anchor_col]) and str(r[anchor_col]).strip() != ""
-                ]
-                if len(anchor_indices) >= 2:
-                    date_re = re.compile(r"^\d{2}[-/]\d{2}[-/]\d{2,4}$")
-                    from collections import defaultdict
-                    anchor_descs = defaultdict(list)
-                    for a in anchor_indices:
-                        d = df.iloc[a][desc_col]
-                        if pd.notna(d) and str(d).strip():
-                            anchor_descs[a].append(str(d).strip())
-                    for i, row in df.iterrows():
-                        if i in anchor_indices:
-                            continue
-                        d = row[desc_col]
-                        if pd.isna(d) or not str(d).strip():
-                            continue
-                        s = str(d).strip()
-                        if date_re.match(s):
-                            continue
-                        nearest = min(anchor_indices, key=lambda a: abs(i - a))
-                        anchor_descs[nearest].append(s)
-                    merged_rows = []
-                    for a in sorted(anchor_indices):
-                        row = df.iloc[a].copy()
-                        assigned = [a] + [
-                            i for i in range(len(df))
-                            if i not in anchor_indices
-                            and min(anchor_indices, key=lambda x: abs(i - x)) == a
-                            and not date_re.match(str(df.iloc[i][desc_col]).strip())
-                        ]
-                        all_descs = []
-                        for idx in sorted(set(assigned)):
-                            d = df.iloc[idx][desc_col]
-                            if pd.notna(d) and str(d).strip() and not date_re.match(str(d).strip()):
-                                all_descs.append(str(d).strip())
-                        uniq = []
-                        seen = set()
-                        for d in all_descs:
-                            if d not in seen:
-                                uniq.append(d)
-                                seen.add(d)
-                        if uniq:
-                            row[desc_col] = "\n".join(uniq)
-                        merged_rows.append(row)
-                    if len(merged_rows) >= 2 and len(merged_rows) < len(df) * 0.8:
-                        merged_df = pd.DataFrame(merged_rows, columns=df.columns)
+        # Merge all columns except the key column
+        for col in df.columns:
+            if col == key_col:
+                continue
+            val = row[col]
+            if pd.isna(val) or (isinstance(val, str) and val.strip() == ""):
+                continue
+            # Append to anchor row's same column
+            anchor_val = df.iloc[anchor_idx][col]
+            if pd.isna(anchor_val) or (isinstance(anchor_val, str) and anchor_val.strip() == ""):
+                new_val = str(val).strip()
+            else:
+                new_val = str(anchor_val).strip() + "\n" + str(val).strip()
+            df.iloc[anchor_idx, df.columns.get_loc(col)] = new_val
 
-        if merged_df is not None:
-            df = merged_df
+        rows_to_drop.append(i)
 
-        # Fallback: merge single‑value rows (in desc_col) into previous row
-        if desc_col is not None and desc_col in df.columns:
-            rows_to_drop = []
-            for i in range(1, len(df)):
-                row = df.iloc[i]
-                non_none = [
-                    c for c in df.columns
-                    if pd.notna(row[c]) and str(row[c]).strip() != ""
-                ]
-                if len(non_none) == 1 and non_none[0] == desc_col:
-                    prev_row = df.iloc[i-1]
-                    if pd.notna(prev_row[desc_col]) and str(prev_row[desc_col]).strip() != "":
-                        current_val = str(row[desc_col]).strip()
-                        prev_val = str(prev_row[desc_col]).strip()
-                        df.iloc[i-1, df.columns.get_loc(desc_col)] = prev_val + "\n" + current_val
-                        rows_to_drop.append(i)
-            if rows_to_drop:
-                df = df.drop(index=rows_to_drop).reset_index(drop=True)
-
-    except Exception:
-        pass
-
+    if rows_to_drop:
+        df = df.drop(index=rows_to_drop).reset_index(drop=True)
     return df
 
 
@@ -558,16 +506,16 @@ def enterprise_grade_table_miner(input_path, output_excel, combine_mode="separat
                 if df.empty:
                     continue
 
-                # *** FIXED: apply merge on any table with at least 2 rows and 2 columns ***
+                # Merge continuation rows (handles multi‑line split across all columns)
                 try:
                     if df.shape[0] >= 2 and df.shape[1] >= 2:
                         before = len(df)
-                        df_merged = _merge_multiline_generic(df)
+                        df_merged = _merge_continuation_rows(df)
                         if len(df_merged) < before and len(df_merged) >= 2:
-                            print(f"    -> Merged multi-line: {before} -> {len(df_merged)} rows")
+                            print(f"    -> Merged continuation rows: {before} -> {len(df_merged)} rows")
                             df = df_merged
-                except Exception:
-                    pass
+                except Exception as e:
+                    print(f"    [!] Merge continuation failed: {e}")
 
             sheet_label = f"Page_{page_num + 1}_Table_{t_idx + 1}"[:31]
             tables_to_write[sheet_label] = df
