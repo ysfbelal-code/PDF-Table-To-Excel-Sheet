@@ -128,98 +128,133 @@ def _clean_cell(val):
 
 
 def _merge_multiline_generic(df):
-    """Merge vertically split multi-line values into first cell (user request).
-    For tables like Statement where Description is split across rows with no Balance,
-    merge them into the anchor row's Description cell with '\\n'.
-    Dynamic: find anchor column as the one with sparsest non-None (usually Balance), merge Description.
-    No hardcoded keywords.
+    """
+    Merge vertically split multi-line values into the first cell of each logical row.
+
+    Dynamic: finds the sparsest column (anchor) and the densest column (description),
+    then merges all continuation rows (rows where only the description column has a value)
+    into the nearest anchor row's description cell.
+
+    Fallback: if anchor detection fails, any row with exactly one non‑null value (in the
+    description column) is merged into the previous row's description cell and then dropped.
     """
     if df.empty or df.shape[0] < 3:
         return df
-    # Find anchor column: the column with fewest non-None but at least 2 non-None (e.g., Balance)
-    # For statement, Balance has 11 non-None out of 55, Debit has 11, Description has 55
-    # The sparsest is Balance/Debit, the densest is Description
+
     try:
-        # Count non-None per column
+        # Count non‑null per column
         counts = {c: df[c].notna().sum() for c in df.columns}
-        # Anchor is column with 5-50% filled (sparse but not empty)
         total = len(df)
+
+        # ---- 1. Anchor column: the sparsest column with at least 2 non‑null values ----
+        candidates = [c for c, cnt in counts.items() if cnt > 1]
         anchor_col = None
-        min_count = total
-        for c, cnt in counts.items():
-            if 1 < cnt < total * 0.5 and cnt < min_count:
-                # Prefer Balance-like (rightmost sparse column)
-                min_count = cnt
-                anchor_col = c
-        if anchor_col is None:
-            return df
-        # Description column is the one with most non-None (dense)
-        desc_col = max(counts, key=lambda k: counts[k])
-        if counts[desc_col] < total * 0.8:
-            return df
-        # Only merge if anchor and desc are different columns
-        if anchor_col == desc_col:
-            return df
-        # Build anchor indices
-        anchor_indices = [i for i, r in df.iterrows() if pd.notna(r[anchor_col]) and str(r[anchor_col]).strip() != ""]
-        if len(anchor_indices) < 2:
-            return df
-        # For each non-anchor row with desc, assign to nearest anchor (skip date-only rows)
-        date_re = re.compile(r"^\d{2}[-/]\d{2}[-/]\d{2,4}$")
-        from collections import defaultdict
-        anchor_descs = defaultdict(list)
-        for a in anchor_indices:
-            d = df.iloc[a][desc_col]
-            if pd.notna(d) and str(d).strip():
-                anchor_descs[a].append(str(d).strip())
-        for i, row in df.iterrows():
-            if i in anchor_indices:
-                continue
-            d = row[desc_col]
-            if pd.isna(d) or not str(d).strip():
-                continue
-            s = str(d).strip()
-            if date_re.match(s):
-                continue
-            nearest = min(anchor_indices, key=lambda a: abs(i - a))
-            anchor_descs[nearest].append(s)
-        # Rebuild merged rows: for each anchor, create row with merged desc
-        merged_rows = []
-        for a in sorted(anchor_indices):
-            row = df.iloc[a].copy()
-            # Collect descs for this anchor in original order
-            assigned = [a] + [i for i in range(len(df)) if i not in anchor_indices and min(anchor_indices, key=lambda x: abs(i - x)) == a and not date_re.match(str(df.iloc[i][desc_col]).strip())]
-            # Filter out date-only
-            descs_ordered = []
-            for idx in sorted(set(assigned)):
-                d = df.iloc[idx][desc_col]
-                if pd.notna(d) and str(d).strip() and not date_re.match(str(d).strip()):
-                    if str(d).strip() not in descs_ordered:
-                        descs_ordered.append(str(d).strip())
-                    elif idx == a:
-                        # Ensure anchor's own desc is included even if duplicate check would skip
-                        pass
-            # Deduplicate but keep order, ensure anchor's desc first if not already
-            # Rebuild in sorted order to keep original sequence
-            all_descs = []
-            for idx in sorted(set(assigned)):
-                d = df.iloc[idx][desc_col]
-                if pd.notna(d) and str(d).strip() and not date_re.match(str(d).strip()):
-                    all_descs.append(str(d).strip())
-            # Deduplicate consecutive
-            uniq = []
-            seen = set()
-            for d in all_descs:
-                if d not in seen:
-                    uniq.append(d)
-                    seen.add(d)
-            if uniq:
-                row[desc_col] = "\n".join(uniq)
-            merged_rows.append(row)
-        if len(merged_rows) >= 2 and len(merged_rows) < len(df) * 0.8:
-            return pd.DataFrame(merged_rows, columns=df.columns)
+        if candidates:
+            anchor_col = min(candidates, key=lambda c: counts[c])
+
+        # ---- 2. Description column: the densest column ----
+        desc_col = max(counts, key=lambda k: counts[k]) if counts else None
+
+        # If we have both and they are different, perform the main merge
+        merged_df = None
+        if anchor_col is not None and desc_col is not None and anchor_col != desc_col:
+            # Only proceed if description column has a reasonable density (≥ 30%)
+            if counts[desc_col] >= total * 0.3:
+                # Find rows where anchor has a value (these are the "anchor rows")
+                anchor_indices = [
+                    i for i, r in df.iterrows()
+                    if pd.notna(r[anchor_col]) and str(r[anchor_col]).strip() != ""
+                ]
+                if len(anchor_indices) >= 2:
+                    date_re = re.compile(r"^\d{2}[-/]\d{2}[-/]\d{2,4}$")
+                    from collections import defaultdict
+                    anchor_descs = defaultdict(list)
+
+                    # Populate anchor descriptions from the anchor rows themselves
+                    for a in anchor_indices:
+                        d = df.iloc[a][desc_col]
+                        if pd.notna(d) and str(d).strip():
+                            anchor_descs[a].append(str(d).strip())
+
+                    # For every non‑anchor row, assign its description to the nearest anchor
+                    for i, row in df.iterrows():
+                        if i in anchor_indices:
+                            continue
+                        d = row[desc_col]
+                        if pd.isna(d) or not str(d).strip():
+                            continue
+                        s = str(d).strip()
+                        if date_re.match(s):
+                            continue
+                        nearest = min(anchor_indices, key=lambda a: abs(i - a))
+                        anchor_descs[nearest].append(s)
+
+                    # Rebuild rows: for each anchor, collect all descriptions in order
+                    merged_rows = []
+                    for a in sorted(anchor_indices):
+                        row = df.iloc[a].copy()
+                        # Get all indices that belong to this anchor (including the anchor itself)
+                        assigned = [a] + [
+                            i for i in range(len(df))
+                            if i not in anchor_indices
+                            and min(anchor_indices, key=lambda x: abs(i - x)) == a
+                            and not date_re.match(str(df.iloc[i][desc_col]).strip())
+                        ]
+                        # Collect descriptions in order, deduplicate consecutive duplicates
+                        all_descs = []
+                        for idx in sorted(set(assigned)):
+                            d = df.iloc[idx][desc_col]
+                            if pd.notna(d) and str(d).strip() and not date_re.match(str(d).strip()):
+                                all_descs.append(str(d).strip())
+                        # Deduplicate while preserving order
+                        uniq = []
+                        seen = set()
+                        for d in all_descs:
+                            if d not in seen:
+                                uniq.append(d)
+                                seen.add(d)
+                        if uniq:
+                            row[desc_col] = "\n".join(uniq)
+                        merged_rows.append(row)
+
+                    if len(merged_rows) >= 2 and len(merged_rows) < len(df) * 0.8:
+                        merged_df = pd.DataFrame(merged_rows, columns=df.columns)
+                    else:
+                        merged_df = None
+
+        # If main merge produced a new DataFrame, use it; otherwise keep original
+        if merged_df is not None:
+            df = merged_df
+
+        # ---- 3. Fallback: merge single‑value rows into previous row's description ----
+        # This catches cases where anchor detection failed but we still have rows with only description.
+        if desc_col is not None and desc_col in df.columns:
+            rows_to_drop = []
+            for i in range(1, len(df)):
+                row = df.iloc[i]
+                # Count non‑null values in this row (excluding empty strings)
+                non_none = [
+                    c for c in df.columns
+                    if pd.notna(row[c]) and str(row[c]).strip() != ""
+                ]
+                # If exactly one non‑null value and it's in the description column
+                if len(non_none) == 1 and non_none[0] == desc_col:
+                    prev_row = df.iloc[i-1]
+                    # Only merge if previous row also has a description value
+                    if pd.notna(prev_row[desc_col]) and str(prev_row[desc_col]).strip() != "":
+                        # Append current description to previous row's description
+                        current_val = str(row[desc_col]).strip()
+                        prev_val = str(prev_row[desc_col]).strip()
+                        df.iloc[i-1, df.columns.get_loc(desc_col)] = prev_val + "\n" + current_val
+                        # Mark this row for dropping
+                        rows_to_drop.append(i)
+            if rows_to_drop:
+                df = df.drop(index=rows_to_drop).reset_index(drop=True)
+
     except Exception:
+        # If anything fails, return the original DataFrame (or as‑is)
         pass
+
     return df
 
 
