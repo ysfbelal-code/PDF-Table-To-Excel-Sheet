@@ -130,4 +130,4 @@ with st.expander("📬 Feedback", expanded=False):
                 
                 except Exception as e:
                     st.error(f"Failed to send report: {e}")
-                    st.info("Please try again later or contact us directly.")
+                    st.info("Please try again later or contact us directly at ysfbelal@gmail.com.")
