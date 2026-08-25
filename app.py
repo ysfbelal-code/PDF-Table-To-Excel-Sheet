@@ -73,13 +73,13 @@ else:
 
 # ---------- Report an Issue section ----------
 st.divider()
-with st.expander("📬 Report an Issue", expanded=False):
-    st.markdown("If you encountered an error or unexpected behaviour, please submit a report below. "
+with st.expander("📬 Feedback", expanded=False):
+    st.markdown("If you encountered an error, unexpected behaviour, or want to request any new features, please submit a report below. "
                 "We'll get back to you as soon as possible.")
     
     with st.form("report_form"):
-        user_email = st.text_input("Your email (optional)", placeholder="so we can reply")
-        problem_description = st.text_area("Describe the issue in detail", height=150,
+        user_email = st.text_input("Your email (optional)", placeholder="Example: john_doe@example.com")
+        problem_description = st.text_area("Insert your feedback here", height=150,
                                            placeholder="What happened? What did you expect?")
         attach_pdf = st.file_uploader("Attach the PDF that caused the problem (optional)", type=["pdf"])
         
