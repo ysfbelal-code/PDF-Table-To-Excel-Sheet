@@ -1,0 +1,11 @@
+streamlit>=1.28.0
+pandas>=2.0.0
+openpyxl>=3.1.0
+img2table>=2.0.0
+pypdfium2>=4.0.0
+pdfplumber>=0.10.0
+python-doctr>=0.7.0        # optional but recommended for Arabic + English OCR
+torch>=1.13.0              # DocTR requires PyTorch; use CPU version for cloud
+easyocr>=1.7.0             # fallback OCR engine
+pytesseract>=0.3.10        # fallback OCR (though system Tesseract is used)
+pdf2image>=1.16.0          # required by img2table for PDF rendering

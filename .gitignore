@@ -1,0 +1,17 @@
+# Local Tesseract/Poppler (Windows only – not used on cloud)
+Tesseract-OCR/
+poppler-26.02.0/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Temporary files
+*.tmp
+*.xlsx
+*.pdf
+
+# IDE
+.vscode/
+.idea/
