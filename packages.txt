@@ -1,6 +1,5 @@
 poppler-utils
 libgl1-mesa-glx
-libglib2.0-0
 libgthread-2.0-0
 libsm6
 libxext6
