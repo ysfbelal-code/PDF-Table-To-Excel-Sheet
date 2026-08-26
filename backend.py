@@ -154,69 +154,88 @@ def _looks_like_statement(df):
 
 
 def _merge_multiline_generic(df):
-    """Merge vertically split multi-line values into first cell (user request).
-    Only applies to statement-like tables (sparse right-side numeric column + dense text column).
-    For non-statement tables (curriculum, syllabus, schedules), returns df unchanged.
     """
-    if df.empty or df.shape[0] < 3:
+    Generic merge of rows that are likely continuations of a previous row's text.
+    A continuation row has exactly one non-null cell, and that cell contains
+    text (not a date/amount/ID). The content is appended to the nearest preceding
+    row that has at least two non-null cells.
+    """
+    if df.empty or len(df) < 2:
         return df
-    # NEW: structural guard — only merge if table looks like a statement
-    if not _looks_like_statement(df):
-        return df
-    try:
-        # Count non-None per column
-        counts = {c: df[c].notna().sum() for c in df.columns}
-        total = len(df)
-        anchor_col = None
-        min_count = total
-        for c, cnt in counts.items():
-            if 1 < cnt < total * 0.5 and cnt < min_count:
-                min_count = cnt
-                anchor_col = c
-        if anchor_col is None:
-            return df
-        desc_col = max(counts, key=lambda k: counts[k])
-        if counts[desc_col] < total * 0.8:
-            return df
-        if anchor_col == desc_col:
-            return df
-        anchor_indices = [i for i, r in df.iterrows() if pd.notna(r[anchor_col]) and str(r[anchor_col]).strip() != ""]
-        if len(anchor_indices) < 2:
-            return df
-        date_re = re.compile(r"^\d{2}[-/]\d{2}[-/]\d{2,4}$")
-        for i, row in df.iterrows():
-            if i in anchor_indices:
-                continue
-            d = row[desc_col]
-            if pd.isna(d) or not str(d).strip():
-                continue
-            s = str(d).strip()
-            if date_re.match(s):
-                continue
-        merged_rows = []
-        for a in sorted(anchor_indices):
-            row = df.iloc[a].copy()
-            assigned = [a] + [i for i in range(len(df)) if i not in anchor_indices and min(anchor_indices, key=lambda x: abs(i - x)) == a and not date_re.match(str(df.iloc[i][desc_col]).strip())]
-            all_descs = []
-            for idx in sorted(set(assigned)):
-                d = df.iloc[idx][desc_col]
-                if pd.notna(d) and str(d).strip() and not date_re.match(str(d).strip()):
-                    all_descs.append(str(d).strip())
-            uniq = []
-            seen = set()
-            for d in all_descs:
-                if d not in seen:
-                    uniq.append(d)
-                    seen.add(d)
-            if uniq:
-                row[desc_col] = "\n".join(uniq)
-            merged_rows.append(row)
-        if len(merged_rows) >= 2 and len(merged_rows) < len(df) * 0.8:
-            return pd.DataFrame(merged_rows, columns=df.columns)
-    except Exception:
-        pass
-    return df
 
+    # Helper: check if value is data-like (date, amount, ID)
+    def _is_data_like(val):
+        if val is None or not isinstance(val, str):
+            return False
+        s = val.strip()
+        if re.search(r"\d{2}[-/]\d{2}[-/]\d{2,4}", s):  # date
+            return True
+        if re.search(r"\d+[\.,]\d{2}", s):              # amount
+            return True
+        if re.match(r"^[\d\-\s]+$", s) and re.search(r"\d", s):  # numeric ID
+            return True
+        return False
+
+    # Count non-null per row
+    non_null_counts = df.notna().sum(axis=1)
+
+    # Find rows that are candidates for merging (single non-null AND not data-like)
+    candidate_indices = []
+    for idx in non_null_counts[non_null_counts == 1].index:
+        row = df.loc[idx]
+        non_null_col = row.first_valid_index()  # the column with the value
+        if non_null_col is not None:
+            val = row[non_null_col]
+            if not _is_data_like(val):
+                candidate_indices.append((idx, non_null_col))
+
+    if not candidate_indices:
+        return df
+
+    # Find anchor rows: rows with at least two non-null cells
+    anchor_indices = non_null_counts[non_null_counts >= 2].index.tolist()
+    if not anchor_indices:
+        # No anchor; cannot merge (though we could merge forward? skip)
+        return df
+
+    # Build a map: for each candidate, find nearest anchor (by index distance)
+    # We'll merge each candidate into the anchor that is closest (preferring previous anchor if tie)
+    merged_rows = {}
+    # We'll process from top to bottom, merging candidates into the last seen anchor
+    # This avoids conflicts.
+    current_anchor = None
+    for idx in range(len(df)):
+        row = df.iloc[idx]
+        if idx in anchor_indices:
+            current_anchor = idx
+            # initialize merged row from this anchor
+            merged_rows[idx] = row.copy()
+        elif idx in [c[0] for c in candidate_indices] and current_anchor is not None:
+            # This is a continuation row; append its value to the current anchor's cell
+            # Find the column of the candidate
+            col = [c for c in candidate_indices if c[0] == idx][0][1]
+            if col is not None:
+                # Append to the anchor's cell
+                anchor_row = merged_rows[current_anchor]
+                if pd.notna(anchor_row[col]):
+                    anchor_row[col] = str(anchor_row[col]) + "\n" + str(row[col])
+                else:
+                    anchor_row[col] = str(row[col])
+        # Rows with >=2 non-null but not in anchor_indices? Actually all such rows are anchors.
+        # Rows with 0 non-null are ignored.
+
+    # If there are candidates before the first anchor, we could merge them into the first anchor,
+    # but that's unlikely; we'll just drop them for safety (or keep them as is).
+    # Build a new DataFrame from merged_rows (only anchors)
+    if merged_rows:
+        # Sort by index to preserve order
+        sorted_indices = sorted(merged_rows.keys())
+        new_df = pd.DataFrame([merged_rows[i] for i in sorted_indices], columns=df.columns)
+        # Drop any rows that are completely empty (shouldn't happen)
+        new_df.dropna(how='all', inplace=True)
+        return new_df
+    else:
+        return df
 
 def _combine_tables(tables_dict):
     """Combine tables with same headers (user request).
